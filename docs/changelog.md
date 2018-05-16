@@ -1,7 +1,6 @@
 ## v0.2.4 (unreleased)
 
-- `NEW` getDirectionalDerivative()
-
+- `NEW` FMI functions: getTypesPlatform(), getVersion(), setDebugLogging(), get*Status(), cancelStep() and getDirectionalDerivative()
 
 ## v0.2.3 (2018-04-11)
 
