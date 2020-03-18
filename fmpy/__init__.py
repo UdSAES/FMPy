@@ -5,18 +5,21 @@ import os
 from ctypes import *
 import _ctypes
 
-__version__ = '0.2.4'
+__version__ = '0.2.17'
 
 
 # determine the platform
 if sys.platform.startswith('win'):
     platform = 'win'
+    system = 'windows'
     sharedLibraryExtension = '.dll'
 elif sys.platform.startswith('linux'):
     platform = 'linux'
+    system = 'linux'
     sharedLibraryExtension = '.so'
 elif sys.platform.startswith('darwin'):
     platform = 'darwin'
+    system = 'darwin'
     sharedLibraryExtension = '.dylib'
 else:
     raise Exception("Unsupported platform: " + sys.platform)
@@ -25,51 +28,61 @@ else:
 # load the C library functions
 if sys.platform.startswith('win'):
     calloc = cdll.msvcrt.calloc
+    realloc = cdll.msvcrt.realloc
     free = cdll.msvcrt.free
     freeLibrary = _ctypes.FreeLibrary
 else:
     from ctypes.util import find_library
     libc = CDLL(find_library("c"))
     calloc = libc.calloc
+    realloc = libc.realloc
     free = libc.free
     freeLibrary = _ctypes.dlclose
-
 
 calloc.argtypes = [c_size_t, c_size_t]
 calloc.restype = c_void_p
 
+realloc.argtypes = [c_void_p, c_size_t]
+realloc.restype = c_void_p
+
 free.argtypes = [c_void_p]
+free.restype = None
 
 if sys.maxsize > 2**32:
     platform += '64'
+    architecture = 'x86_64'
 else:
     platform += '32'
+    architecture = 'i686'
+
+platform_tuple = architecture + '-' + system
 
 
 def supported_platforms(filename):
     """ Get the platforms supported by the FMU without extracting it
 
     Parameters:
-        filename    filename of the FMU or directory with extracted FMU
+        filename    filename of the FMU, directory with extracted FMU or file like object
 
     Returns:
         platforms   a list of supported platforms supported by the FMU
     """
 
-    import zipfile
-
-    platforms = []
+    from .util import _is_string
 
     # get the files within the FMU
-    if os.path.isdir(filename):
+    if _is_string(filename) and os.path.isdir(filename):  # extracted FMU
         names = []
         for dirpath, _, filenames in os.walk(filename):
             for name in filenames:
                 abspath = os.path.join(dirpath, name)
                 names.append(os.path.relpath(abspath, start=filename).replace('\\', '/'))
-    else:
+    else:  # FMU as path or file like object
+        import zipfile
         with zipfile.ZipFile(filename, 'r') as zf:
             names = zf.namelist()
+
+    platforms = []
 
     # check for the C-sources
     for name in names:
@@ -81,24 +94,24 @@ def supported_platforms(filename):
     # check for *.dylib on Mac
     for name in names:
         head, tail = os.path.split(name)
-        if head == 'binaries/darwin64' and tail.endswith('.dylib'):
+        if head in {'binaries/darwin64', 'binaries/x86_64-darwin'} and tail.endswith('.dylib'):
             platforms.append('darwin64')
             break
 
     # check for *.so on Linux
-    for platform in ['linux32', 'linux64']:
+    for bitness, architecture in [('32', 'i686'), ('64', 'x86_64')]:
         for name in names:
             head, tail = os.path.split(name)
-            if head == 'binaries/' + platform and tail.endswith('.so'):
-                platforms.append(platform)
+            if head in {'binaries/linux' + bitness, 'binaries/' + architecture + '-linux'} and tail.endswith('.so'):
+                platforms.append('linux' + bitness)
                 break
 
     # check for *.dll on Windows
-    for platform in ['win32', 'win64']:
+    for bitness, architecture in [('32', 'i686'), ('64', 'x86_64')]:
         for name in names:
             head, tail = os.path.split(name)
-            if head == 'binaries/' + platform and tail.endswith('.dll'):
-                platforms.append(platform)
+            if head in {'binaries/win' + bitness, 'binaries/' + architecture + '-windows'} and tail.endswith('.dll'):
+                platforms.append('win' + bitness)
                 break
 
     return platforms
@@ -151,28 +164,40 @@ def fmi_info(filename):
     return fmi_version, fmi_types
 
 
-def extract(filename):
+def extract(filename, unzipdir=None):
     """ Extract a ZIP archive to a temporary directory
 
     Parameters:
         filename    filename of the ZIP archive
+        unzipdir    target directory (None: create temporary directory)
 
     Returns:
-        unzipdir    the path to the directory that contains the extracted files
+        unzipdir    path to the directory that contains the extracted files
     """
 
     from tempfile import mkdtemp
     import zipfile
 
-    unzipdir = mkdtemp()
+    if unzipdir is None:
+        unzipdir = mkdtemp()
 
     # expand the 8.3 paths on windows
-    if sys.platform.startswith('win'):
+    if sys.platform.startswith('win') and '~' in unzipdir:
         import win32file
         unzipdir = win32file.GetLongPathName(unzipdir)
 
-    # extract the archive
     with zipfile.ZipFile(filename, 'r') as zf:
+
+        # check filenames
+        for name in zf.namelist():
+            
+            if '\\' in name:
+                raise Exception("Illegal path %s found in %s. All slashes must be forward slashes." % (name, filename))
+
+            if ':' in name or name.startswith('/'):
+                raise Exception("Illegal path %s found in %s. The path must not contain a drive or device letter, or a leading slash." % (name, filename))
+
+        # extract the archive
         zf.extractall(unzipdir)
 
     return unzipdir
@@ -192,3 +217,4 @@ def dump(filename):
 # make the functions available in the fmpy module
 from .model_description import read_model_description
 from .simulation import simulate_fmu
+from .util import plot_result, read_csv, write_csv

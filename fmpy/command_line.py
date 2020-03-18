@@ -35,7 +35,7 @@ def main():
     parser.add_argument('--stop-time', type=float, help="stop time for the simulation")
     parser.add_argument('--solver', choices=['Euler', 'CVode'], default='CVode', help="solver to use for Model Exchange")
     parser.add_argument('--step-size', type=float, help="step size for fixed-step solvers")
-    parser.add_argument('--relative-tolerance', type=float, help="relative tolerance for the 'CVode' solver")
+    parser.add_argument('--relative-tolerance', type=float, help="relative tolerance for the 'CVode' solver and FMI 2.0 co-simulation FMUs")
     parser.add_argument('--dont-record-events', action='store_true', help="dont't record outputs at events (model exchange only)")
     parser.add_argument('--start-values', nargs='+', help="name-value pairs of start values")
     parser.add_argument('--apply-default-start-values', action='store_true', help="apply the start values from the model description")
@@ -45,6 +45,7 @@ def main():
     parser.add_argument('--output-file', help="CSV to store the results")
     parser.add_argument('--timeout', type=float, help="max. time to wait for the simulation to finish")
     parser.add_argument('--debug-logging', action='store_true', help="enable the FMU's debug logging")
+    parser.add_argument('--visible', action='store_true', help="enable interactive mode")
     parser.add_argument('--fmi-logging', action='store_true', help="enable FMI logging")
     parser.add_argument('--show-plot', action='store_true', help="plot the results")
 
@@ -111,6 +112,7 @@ def main():
                               output=args.output_variables,
                               timeout=args.timeout,
                               debug_logging=args.debug_logging,
+                              visible=args.visible,
                               fmi_call_logger=fmi_call_logger)
 
         if args.output_file:

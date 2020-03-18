@@ -1,15 +1,18 @@
 # noinspection PyPep8
 
 import shutil
-import sys
-
 from .fmi1 import *
 from .fmi1 import _FMU1
 from .fmi2 import *
+from .fmi2 import _FMU2
+from . import fmi3
 from . import extract
 from .util import auto_interval
 import numpy as np
 from time import time as current_time
+
+# absolute tolerance for equality when comparing two floats
+eps = 1e-13
 
 
 class Recorder(object):
@@ -27,17 +30,10 @@ class Recorder(object):
         self.fmu = fmu
         self.interval = interval
 
-        self.cols = [('time', np.float64)]
+        self.cols = [('time', np.float64, None)]  # name, dtype, shape
         self.rows = []
-
-        real_names = []
-        self.real_vrs = []
-
-        integer_names = []
-        self.integer_vrs = []
-
-        boolean_names = []
-        self.boolean_vrs = []
+        self.info = {}  # type -> (names, vrs, shapes, n_values, getter)
+        self.types = []
 
         self.constants = {}
         self.modelDescription = modelDescription
@@ -45,43 +41,67 @@ class Recorder(object):
         # collect the variables to record
         for sv in modelDescription.modelVariables:
 
+            if sv.name == 'time':
+                continue  # "time" is reserved for the simulation time
+
             # collect the variables to record
             if (variableNames is not None and sv.name in variableNames) or (variableNames is None and sv.causality == 'output'):
+                type = sv.type
+                if type == 'Enumeration':
+                    type = 'Integer' if modelDescription.fmiVersion in {'1.0', '2.0'} else 'Int32'
+                names, vrs, shapes, n_values, getter = self.info.get(type, ([], [], [], 0, getattr(self.fmu, 'get' + type)))
+                names.append(sv.name)
+                vrs.append(sv.valueReference)
+                shapes.append(sv.dimensions)
+                n_values += np.prod(sv.dimensions) if sv.dimensions else 1
+                self.info[type] = names, vrs, shapes, n_values, getter
 
-                if sv.type == 'Real':
-                    real_names.append(sv.name)
-                    self.real_vrs.append(sv.valueReference)
-                elif sv.type in ['Integer', 'Enumeration']:
-                    integer_names.append(sv.name)
-                    self.integer_vrs.append(sv.valueReference)
-                elif sv.type == 'Boolean':
-                    boolean_names.append(sv.name)
-                    self.boolean_vrs.append(sv.valueReference)
-                else:
-                    pass  # skip String variables
+        # create the columns for the NumPy array
+        if modelDescription.fmiVersion in ['1.0', '2.0']:
+            types = [('Real', np.float64), ('Integer', np.int32), ('Boolean', np.bool_)]
+        else:
+            types = [('Float64', np.float64), ('Int32', np.int32), ('UInt64', np.uint64), ('Boolean', np.bool_)]
 
-        self.cols += zip(real_names, [np.float64] * len(real_names))
-        self.cols += zip(integer_names, [np.int32] * len(integer_names))
-        self.cols += zip(boolean_names, [np.bool_] * len(boolean_names))
+        # collect the columns
+        for t, dt in types:
+            if t in self.info:
+                self.types.append(t)
+                names, _, shapes, _, _ = self.info[t]
+                self.cols += zip(names, [dt] * len(names), shapes)
+
+        # strip the shape for scalars
+        self.cols = [(n, t) if s is None else (n, t, s) for n, t, s in self.cols]
+
+    @staticmethod
+    def _append_reshaped(row, values, shapes):
+        i = 0
+        for d in shapes:
+            if d:
+                s = np.prod(d)
+                value = np.array(values[i:i + s]).reshape(d)
+                i += s
+            else:
+                value = values[i]
+                i += 1
+            row.append(value)
 
     def sample(self, time, force=False):
         """ Record the variables """
 
         if not force and self.interval is not None and len(self.rows) > 0:
             last = self.rows[-1][0]
-            if time - last < self.interval:
+            if time - last + eps < self.interval:
                 return
 
         row = [time]
 
-        if self.real_vrs:
-            row += self.fmu.getReal(vr=self.real_vrs)
-
-        if self.integer_vrs:
-            row += self.fmu.getInteger(vr=self.integer_vrs)
-
-        if self.boolean_vrs:
-            row += self.fmu.getBoolean(vr=self.boolean_vrs)
+        for t in self.types:
+            names, vrs, shapes, nValues, getter = self.info[t]
+            if self.modelDescription.fmiVersion in ['1.0', '2.0']:
+                values = getter(vr=vrs)
+            else:
+                values = getter(vr=vrs, nValues=nValues)
+            self._append_reshaped(row, values, shapes)
 
         self.rows.append(tuple(row))
 
@@ -108,134 +128,184 @@ class Input(object):
             fmu               the FMU instance
             modelDescription  the model description instance
             signals           a structured numpy array that contains the input
+
+        Example:
+
+        Create a Real signal 'step' and a Boolean signal 'switch' with a discrete step at t=0.5
+
+        >>> import numpy as np
+        >>> dtype = [('time', np.double), ('step', np.double), ('switch', np.bool_)]
+        >>> signals = np.array([(0.0, 0.0, False), (0.5, 0.0, False), (0.5, 0.1, True), (1.0, 1.0, True)], dtype=dtype)
         """
 
         self.fmu = fmu
-        self.signals = signals
 
         if signals is None:
+            self.t = None
             return
 
+        # get the time grid
+        self.t = signals[signals.dtype.names[0]]
+
+        # find events
+        self.t_events = Input.findEvents(signals, modelDescription)
+
         is_fmi1 = isinstance(fmu, _FMU1)
+        is_fmi2 = isinstance(fmu, _FMU2)
+
+        setters = dict()
 
         # get the setters
         if is_fmi1:
-            self._setReal = fmu.fmi1SetReal
-            self._setInteger = fmu.fmi1SetInteger
-            self._setBoolean = fmu.fmi1SetBoolean
-            self._bool_type = fmi1Boolean
+            setters['Real']    = (fmu.fmi1SetReal,    fmi1Real)
+            setters['Integer'] = (fmu.fmi1SetInteger, fmi1Integer)
+            setters['Boolean'] = (fmu.fmi1SetBoolean, c_int8)
+        elif is_fmi2:
+            setters['Real']    = (fmu.fmi2SetReal,    fmi2Real)
+            setters['Integer'] = (fmu.fmi2SetInteger, fmi2Integer)
+            setters['Boolean'] = (fmu.fmi2SetBoolean, fmi2Boolean)
         else:
-            self._setReal = fmu.fmi2SetReal
-            self._setInteger = fmu.fmi2SetInteger
-            self._setBoolean = fmu.fmi2SetBoolean
-            self._bool_type = fmi2Boolean
+            setters['Float64'] = (fmu.fmi3SetFloat64, fmi3.fmi3Float64)
+            setters['Int32']   = (fmu.fmi3SetInt32,   fmi3.fmi3Int32)
+            setters['Boolean'] = (fmu.fmi3SetBoolean, fmi3.fmi3Boolean)
 
-        self.values = {'Real': [], 'Integer': [], 'Boolean': [], 'String': []}
+        from collections import defaultdict
 
-        for sv in modelDescription.modelVariables:
+        continuous_inputs = defaultdict(list)
+        discrete_inputs = defaultdict(list)
 
-            if sv.name is None:
+        self.continuous = []
+        self.discrete = []
+
+        for variable in modelDescription.modelVariables:
+
+            if variable.causality != 'input' and variable.variability != 'tunable':
                 continue
 
-            if sv.causality == 'input':
-                if sv.name not in self.signals.dtype.names:
-                    print("Warning: missing input for " + sv.name)
-                    continue
-                self.values['Integer' if sv.type == 'Enumeration' else sv.type].append((sv.valueReference, sv.name))
+            if variable.name not in signals.dtype.names:
+                if variable.causality == 'input':
+                    print('Warning: missing input for variable "%s"' % variable.name)
+                continue
 
-        if len(self.values['Real']) > 0:
-            real_vrs, self.real_names = zip(*self.values['Real'])
-            self.real_vrs = (c_uint32 * len(real_vrs))(*real_vrs)
-            self.real_values = (c_double * len(real_vrs))()
-            self.real_table = np.stack(map(lambda n: self.signals[n], self.real_names))
-        else:
-            self.real_vrs = []
+            if variable.type in {'Float32', 'Float64', 'Real'} and variable.variability not in ['discrete', 'tunable']:
+                continuous_inputs[variable.type].append((variable.valueReference, variable.name))
+            else:
+                # use the same table for Integer and Enumeration
+                type_ = 'Integer' if variable.type == 'Enumeration' else variable.type
+                discrete_inputs[type_].append((variable.valueReference, variable.name))
 
-        if len(self.values['Integer']) > 0:
-            integer_vrs, self.integer_names = zip(*self.values['Integer'])
-            self.integer_vrs = (c_uint32 * len(integer_vrs))(*integer_vrs)
-            self.integer_values = (c_int32 * len(integer_vrs))()
-            self.integer_table = np.asarray(np.stack(map(lambda n: self.signals[n], self.integer_names)), dtype=np.int32)
-        else:
-            self.integer_vrs = []
-
-        if len(self.values['Boolean']) > 0:
-            boolean_vrs, self.boolean_names = zip(*self.values['Boolean'])
-            self.boolean_vrs = (c_uint32 * len(boolean_vrs))(*boolean_vrs)
-            self.boolean_values = ((c_int8 if is_fmi1 else c_int32) * len(boolean_vrs))()
-            self.boolean_table = np.asarray(np.stack(map(lambda n: self.signals[n], self.boolean_names)), dtype=np.int32)
-        else:
-            self.boolean_vrs = []
+        for inputs, buf in [(continuous_inputs, self.continuous), (discrete_inputs, self.discrete)]:
+            for type_, vrs_and_names in inputs.items():
+                vrs, names = zip(*vrs_and_names)
+                setter, value_type = setters[type_]
+                buf.append((
+                    (c_uint32 * len(vrs))(*vrs),
+                    (value_type * len(vrs))(),
+                    np.asarray(np.stack(map(lambda n: signals[n], names)), dtype=value_type),
+                    setter
+                ))
 
     def apply(self, time, continuous=True, discrete=True, after_event=False):
+        """ Apply the input
 
-        if self.signals is None:
-            return sys.float_info.max
+        Parameters:
+            continuous   apply continuous inputs
+            discrete     apply discrete inputs
+            after_event  apply right hand side inputs at discontinuities
+        """
 
-        t = self.signals['time']
+        if self.t is None:
+            return
 
-        # TODO: check for event
+        is_fmi3 = isinstance(self.fmu, fmi3._FMU3)
 
-        if len(self.real_vrs) > 0 and continuous:
-            self.real_values[:] = self.interpolate(time=time, t=t, table=self.real_table, after_event=after_event)
-            self._setReal(self.fmu.component, self.real_vrs, len(self.real_vrs), self.real_values)
+        # continuous
+        if continuous:
+            for vrs, values, table, setter in self.continuous:
+                values[:] = self.interpolate(time=time, t=self.t, table=table, discrete=False, after_event=after_event)
+                if is_fmi3:
+                    setter(self.fmu.component, vrs, len(vrs), values, len(values))
+                else:
+                    setter(self.fmu.component, vrs, len(vrs), values)
 
-        # TODO: discrete apply Reals
+        # discrete
+        if discrete:
+            for vrs, values, table, setter in self.discrete:
+                values[:] = self.interpolate(time=time, t=self.t, table=table, discrete=True, after_event=after_event)
 
-        if len(self.integer_vrs) > 0 and discrete:
-            self.integer_values[:] = self.interpolate(time=time, t=t, table=self.integer_table, discrete=True, after_event=after_event)
-            self._setInteger(self.fmu.component, self.integer_vrs, len(self.integer_vrs), self.integer_values)
+                if values._type_ == c_int8:
+                    # special treatment for fmi1Boolean
+                    setter(self.fmu.component, vrs, len(vrs), cast(values, POINTER(c_char)))
+                else:
+                    if is_fmi3:
+                        setter(self.fmu.component, vrs, len(vrs), values, len(values))
+                    else:
+                        setter(self.fmu.component, vrs, len(vrs), values)
 
-        if len(self.boolean_vrs) > 0 and discrete:
-            self.boolean_values[:] = self.interpolate(time=time, t=t, table=self.boolean_table, discrete=True, after_event=after_event)
-            self._setBoolean(self.fmu.component, self.boolean_vrs, len(self.boolean_vrs),
-                             cast(self.boolean_values, POINTER(self._bool_type)))
+    def nextEvent(self, time):
+        """ Get the next input event """
 
-        return Input.nextEvent(time, t)
+        if self.t is None:
+            return float('Inf')
+
+        # find the next event
+        i = np.argmax(self.t_events > time)
+        return self.t_events[i]
 
     @staticmethod
-    def nextEvent(time, t):
+    def findEvents(signals, model_description):
+        """ Find time events """
 
-        i_events = np.argwhere(np.diff(t) == 0)
-        t_events = t[i_events]
+        t_event = {float('Inf')}
 
-        i = np.argmax(t_events > time)
+        if signals.size < 2:
+            return np.array(list(t_event))  # only one sample
 
-        if t_events[i] > time:
-            return t_events[i][0]
-        else:
-            return sys.float_info.max
+        t = signals[signals.dtype.names[0]]
+
+        # continuous
+        i_event = np.where(np.diff(t) == 0)
+        t_event.update(t[i_event])
+
+        # discrete
+        for variable in model_description.modelVariables:
+            if variable.name in signals.dtype.names and variable.variability in ['discrete', 'tunable']:
+                y = signals[variable.name]
+                i_event = np.flatnonzero(np.diff(y))
+                t_event.update(t[i_event + 1])
+
+        return np.array(sorted(t_event))
 
     @staticmethod
     def interpolate(time, t, table, discrete=False, after_event=False):
 
+        if t.size < 2:
+            return table  # only one sample
+
         # find the left insert index
         i0 = np.searchsorted(t, time)
 
+        if i0 == 0:
+            return table[:, 0]  # hold first value
+
+        if i0 == len(t):
+            return table[:, -1]  # hold last value
+
         # check for event
-        is_event = i0 < len(t) - 1 and t[i0] == t[i0 + 1]
+        if time == t[i0] and i0 < len(t) - 1 and t[i0] == t[i0 + 1]:
 
-        if is_event:
             if after_event:
-                return table[:, i0 + 1]
-            else:
-                return table[:, i0]
+                # take the value after the event
+                while i0 < len(t) - 1 and t[i0] == t[i0 + 1]:
+                    i0 += 1
 
-        if i0 >= len(t):
-            # extrapolate right
-            i0 = len(t) - 2
-        elif i0 > 0:
-            # interpolate
-            i0 -= 1
+            return table[:, i0]
 
-        # take the value after the event
-        while i0 < len(t) - 1 and t[i0] == t[i0 + 1]:
-            i0 += 1
-
+        i0 -= 1  # interpolate
         i1 = i0 + 1
 
         if discrete:
-            return table[:, i0]
+            return table[:, i1 if after_event else i0]
 
         t0 = t[i0]
         t1 = t[i1]
@@ -275,20 +345,28 @@ def apply_start_values(fmu, model_description, start_values, apply_default_start
 
         vr = variable.valueReference
 
-        if variable.type == 'Real':
-            fmu.setReal([vr], [float(value)])
-        elif variable.type in ['Integer', 'Enumeration']:
-            fmu.setInteger([vr], [int(value)])
-        elif variable.type == 'Boolean':
+        # get the setter function
+        if variable.type == 'Enumeration':
+            if model_description.fmiVersion in {'1.0', '2.0'}:
+                setter = getattr(fmu, 'setInteger')
+            else:
+                setter = getattr(fmu, 'setInt32')
+        else:
+            setter = getattr(fmu, 'set' + variable.type)
+
+        # convert Boolean values
+        if variable.type == 'Boolean':
             if isinstance(value, str):
                 if value.lower() not in ['true', 'false']:
                     raise Exception('The start value "%s" for variable "%s" could not be converted to Boolean' %
                                     (value, variable.name))
                 else:
                     value = value.lower() == 'true'
-            fmu.setBoolean([vr], [bool(value)])
-        elif variable.type == 'String':
-            fmu.setString([vr], [value])
+
+        # convert the type
+        value = variable._python_type(value)
+
+        setter([vr], [value])
 
     if len(start_values) > 0:
         raise Exception("The start values for the following variables could not be set because they don't exist: " +
@@ -333,9 +411,17 @@ class ForwardEuler(object):
         # check for state event
         self.prez[:] = self.z
         self.get_z(self._pz, self.z.size)
-        stateEvent = np.any((self.prez * self.z) < 0)
 
-        return stateEvent, tNext
+        roots = np.zeros_like(self.z, dtype=np.int32)
+
+        # find zero crossings
+        for i, (prez, z) in enumerate(zip(self.prez, self.z)):
+            if prez < 0 and z >= 0:
+                roots[i] = -1
+            elif prez > 0 and z <= 0:
+                roots[i] = 1
+
+        return np.any(roots != 0), roots, tNext
 
     def reset(self, time):
         pass  # nothing to do
@@ -358,6 +444,7 @@ def simulate_fmu(filename,
                  output=None,
                  timeout=None,
                  debug_logging=False,
+                 visible=False,
                  logger=None,
                  fmi_call_logger=None,
                  step_finished=None,
@@ -371,17 +458,18 @@ def simulate_fmu(filename,
         stop_time           simulation stop time (None: use default experiment or start_time + 1 if not defined)
         solver              solver to use for model exchange ('Euler' or 'CVode')
         step_size           step size for the 'Euler' solver
-        relative_tolerance  relative tolerance for the 'CVode' solver
+        relative_tolerance  relative tolerance for the 'CVode' solver and FMI 2.0 co-simulation FMUs
         output_interval     interval for sampling the output
         record_events       record outputs at events (model exchange only)
         fmi_type            FMI type for the simulation (None: determine from FMU)
         use_source_code     compile the shared library (requires C sources)
         start_values        dictionary of variable name -> value pairs
         apply_default_start_values  apply the start values from the model description
-        input               a structured numpy array that contains the input
+        input               a structured numpy array that contains the input (see :class:`Input`)
         output              list of variables to record (None: record outputs)
         timeout             timeout for the simulation
         debug_logging       enable the FMU's debug logging
+        visible             interactive mode (True) or batch mode (False)
         fmi_call_logger     callback function to log FMI calls
         logger              callback function passed to the FMU (experimental)
         step_finished       callback to interact with the simulation (experimental)
@@ -423,15 +511,17 @@ def simulate_fmu(filename,
         else:
             stop_time = start_time + 1.0
 
-    if relative_tolerance is None:
-        if experiment is not None and experiment.tolerance is not None:
-            relative_tolerance = experiment.tolerance
-        else:
-            relative_tolerance = 1e-5
+    if relative_tolerance is None and experiment is not None:
+        relative_tolerance = experiment.tolerance
 
     if step_size is None:
         total_time = stop_time - start_time
         step_size = 10 ** (np.round(np.log10(total_time)) - 3)
+
+    if output_interval is None and fmi_type == 'CoSimulation' and experiment is not None and experiment.stepSize is not None:
+        output_interval = experiment.stepSize
+        while (stop_time - start_time) / output_interval > 1000:
+            output_interval *= 2
 
     if os.path.isfile(os.path.join(filename, 'modelDescription.xml')):
         unzipdir = filename
@@ -459,34 +549,42 @@ def simulate_fmu(filename,
 
     if model_description.fmiVersion == '1.0':
         callbacks = fmi1CallbackFunctions()
-        callbacks.logger = fmi1CallbackLoggerTYPE(logger)
+        callbacks.logger         = fmi1CallbackLoggerTYPE(logger)
         callbacks.allocateMemory = fmi1CallbackAllocateMemoryTYPE(allocateMemory)
-        callbacks.freeMemory = fmi1CallbackFreeMemoryTYPE(freeMemory)
+        callbacks.freeMemory     = fmi1CallbackFreeMemoryTYPE(freeMemory)
         callbacks.stepFinished = None
-    else:
+    elif model_description.fmiVersion == '2.0':
         callbacks = fmi2CallbackFunctions()
-        callbacks.logger = fmi2CallbackLoggerTYPE(logger)
+        callbacks.logger         = fmi2CallbackLoggerTYPE(logger)
         callbacks.allocateMemory = fmi2CallbackAllocateMemoryTYPE(allocateMemory)
-        callbacks.freeMemory = fmi2CallbackFreeMemoryTYPE(freeMemory)
+        callbacks.freeMemory     = fmi2CallbackFreeMemoryTYPE(freeMemory)
+    else:
+        callbacks = fmi3.fmi3CallbackFunctions()
+        callbacks.logMessage     = fmi3.fmi3CallbackLogMessageTYPE(logger)
+        callbacks.allocateMemory = fmi3.fmi3CallbackAllocateMemoryTYPE(fmi3.allocateMemory)
+        callbacks.freeMemory     = fmi3.fmi3CallbackFreeMemoryTYPE(fmi3.freeMemory)
 
     # simulate_fmu the FMU
     if fmi_type == 'ModelExchange' and model_description.modelExchange is not None:
         fmu_args['modelIdentifier'] = model_description.modelExchange.modelIdentifier
-        result = simulateME(model_description, fmu_args, start_time, stop_time, solver, step_size, relative_tolerance, start_values, apply_default_start_values, input, output, output_interval, record_events, timeout, callbacks, debug_logging, step_finished)
+        result = simulateME(model_description, fmu_args, start_time, stop_time, solver, step_size, relative_tolerance, start_values, apply_default_start_values, input, output, output_interval, record_events, timeout, callbacks, debug_logging, visible, step_finished)
     elif fmi_type == 'CoSimulation' and model_description.coSimulation is not None:
         fmu_args['modelIdentifier'] = model_description.coSimulation.modelIdentifier
-        result = simulateCS(model_description, fmu_args, start_time, stop_time, start_values, apply_default_start_values, input, output, output_interval, timeout, callbacks, debug_logging, step_finished)
+        result = simulateCS(model_description, fmu_args, start_time, stop_time, relative_tolerance, start_values, apply_default_start_values, input, output, output_interval, timeout, callbacks, debug_logging, visible, step_finished)
     else:
         raise Exception('FMI type "%s" is not supported by the FMU' % fmi_type)
 
     # clean up
     if tempdir is not None:
-        shutil.rmtree(tempdir)
+        shutil.rmtree(tempdir, ignore_errors=True)
 
     return result
 
 
-def simulateME(model_description, fmu_kwargs, start_time, stop_time, solver_name, step_size, relative_tolerance, start_values, apply_default_start_values, input_signals, output, output_interval, record_events, timeout, callbacks, debug_logging, step_finished):
+def simulateME(model_description, fmu_kwargs, start_time, stop_time, solver_name, step_size, relative_tolerance, start_values, apply_default_start_values, input_signals, output, output_interval, record_events, timeout, callbacks, debug_logging, visible, step_finished):
+
+    if relative_tolerance is None:
+        relative_tolerance = 1e-5
 
     if output_interval is None:
         if step_size is None:
@@ -502,37 +600,38 @@ def simulateME(model_description, fmu_kwargs, start_time, stop_time, solver_name
         while step_size > max_step:
             step_size /= 2
 
-    if not np.isclose(round(output_interval / step_size) * step_size, output_interval):
-        raise Exception("output_interval must be a multiple of step_size")
-
     sim_start = current_time()
-
-    # absolute tolerance for equality when comparing two floats
-    eps = 1e-13
 
     time = start_time
 
     is_fmi1 = model_description.fmiVersion == '1.0'
+    is_fmi2 = model_description.fmiVersion == '2.0'
+    is_fmi3 = model_description.fmiVersion.startswith('3.0')
 
     if is_fmi1:
         fmu = FMU1Model(**fmu_kwargs)
         fmu.instantiate(functions=callbacks, loggingOn=debug_logging)
         fmu.setTime(time)
-    else:
+    elif is_fmi2:
         fmu = FMU2Model(**fmu_kwargs)
-        fmu.instantiate(callbacks=callbacks, loggingOn=debug_logging)
+        fmu.instantiate(visible=visible, callbacks=callbacks, loggingOn=debug_logging)
+        fmu.setupExperiment(startTime=start_time)
+    else:
+        fmu = fmi3.FMU3Model(**fmu_kwargs)
+        fmu.instantiate(visible=visible, callbacks=callbacks, loggingOn=debug_logging)
         fmu.setupExperiment(startTime=start_time)
 
-    # set the start values
+    input = Input(fmu, model_description, input_signals)
+
     apply_start_values(fmu, model_description, start_values, apply_default_start_values)
 
-    input = Input(fmu, model_description, input_signals)
-    input.apply(time)
-
+    # initialize
     if is_fmi1:
+        input.apply(time)
         fmu.initialize()
     else:
         fmu.enterInitializationMode()
+        input.apply(time)
         fmu.exitInitializationMode()
 
         # event iteration
@@ -571,6 +670,10 @@ def simulateME(model_description, fmu_kwargs, start_time, stop_time, solver_name
     else:
         raise Exception("Unknown solver: %s. Must be one of 'Euler' or 'CVode'." % solver_name)
 
+    # check step size
+    if fixed_step and not np.isclose(round(output_interval / step_size) * step_size, output_interval):
+        raise Exception("output_interval must be a multiple of step_size for fixed step solvers")
+
     recorder = Recorder(fmu=fmu,
                         modelDescription=model_description,
                         variableNames=output,
@@ -595,9 +698,12 @@ def simulateME(model_description, fmu_kwargs, start_time, stop_time, solver_name
         else:
             if time + eps >= t_next:  # t_next has been reached
                 # integrate to the next grid point
-                t_next = round(time / output_interval) * output_interval + output_interval
+                t_next = np.floor(time / output_interval) * output_interval + output_interval
+                if t_next < time + eps:
+                    t_next += output_interval
 
-        t_input_event = input.apply(time)
+        # get the next input event
+        t_input_event = input.nextEvent(time)
 
         # check for input event
         input_event = t_input_event <= t_next
@@ -615,13 +721,16 @@ def simulateME(model_description, fmu_kwargs, start_time, stop_time, solver_name
 
         if t_next - time > eps:
             # do one step
-            state_event, time = solver.step(time, t_next)
+            state_event, roots_found, time = solver.step(time, t_next)
         else:
             # skip
             time = t_next
 
         # set the time
         fmu.setTime(time)
+
+        # apply continuous inputs
+        input.apply(time, discrete=False)
 
         # check for step event, e.g.dynamic state selection
         if is_fmi1:
@@ -637,14 +746,19 @@ def simulateME(model_description, fmu_kwargs, start_time, stop_time, solver_name
                 # record the values before the event
                 recorder.sample(time, force=True)
 
-            if input_event:
-                input.apply(time=time, after_event=True)
-
             if is_fmi1:
+                if input_event:
+                    input.apply(time=time, after_event=True)
+                    
                 fmu.eventUpdate()
             else:
-                # handle events
-                fmu.enterEventMode()
+                if is_fmi3:
+                    fmu.enterEventMode(inputEvent=input_event, stepEvent=step_event, rootsFound=roots_found, timeEvent=time_event)
+                else:
+                    fmu.enterEventMode()
+
+                if input_event:
+                    input.apply(time=time, after_event=True)
 
                 fmu.eventInfo.newDiscreteStatesNeeded = fmi2True
                 fmu.eventInfo.terminateSimulation = fmi2False
@@ -661,7 +775,7 @@ def simulateME(model_description, fmu_kwargs, start_time, stop_time, solver_name
                 # record values after the event
                 recorder.sample(time, force=True)
 
-        if abs(time - round(time / output_interval) * output_interval) < eps and time != recorder.lastSampleTime:
+        if abs(time - round(time / output_interval) * output_interval) < eps and time > recorder.lastSampleTime + eps:
             # record values for this step
             recorder.sample(time, force=True)
 
@@ -677,34 +791,44 @@ def simulateME(model_description, fmu_kwargs, start_time, stop_time, solver_name
     return recorder.result()
 
 
-def simulateCS(model_description, fmu_kwargs, start_time, stop_time, start_values, apply_default_start_values, input_signals, output, output_interval, timeout, callbacks, debug_logging, step_finished):
+def simulateCS(model_description, fmu_kwargs, start_time, stop_time, relative_tolerance, start_values, apply_default_start_values, input_signals, output, output_interval, timeout, callbacks, debug_logging, visible, step_finished):
 
     if output_interval is None:
         output_interval = auto_interval(stop_time - start_time)
 
     sim_start = current_time()
 
+    # instantiate the model
     if model_description.fmiVersion == '1.0':
         fmu = FMU1Slave(**fmu_kwargs)
         fmu.instantiate(functions=callbacks, loggingOn=debug_logging)
-        apply_start_values(fmu, model_description, start_values, apply_default_start_values)
-        fmu.initialize()
-    else:
+    elif model_description.fmiVersion == '2.0':
         fmu = FMU2Slave(**fmu_kwargs)
-        fmu.instantiate(callbacks=callbacks, loggingOn=debug_logging)
-        fmu.setupExperiment(tolerance=None, startTime=start_time)
-        apply_start_values(fmu, model_description, start_values, apply_default_start_values)
-        fmu.enterInitializationMode()
-        fmu.exitInitializationMode()
+        fmu.instantiate(visible=visible, callbacks=callbacks, loggingOn=debug_logging)
+        fmu.setupExperiment(tolerance=relative_tolerance, startTime=start_time)
+    else:
+        fmu = fmi3.FMU3Slave(**fmu_kwargs)
+        fmu.instantiate(visible=visible, callbacks=callbacks, loggingOn=debug_logging)
+        fmu.setupExperiment(tolerance=relative_tolerance, startTime=start_time)
 
     input = Input(fmu=fmu, modelDescription=model_description, signals=input_signals)
 
-    recorder = Recorder(fmu=fmu,
-                        modelDescription=model_description,
-                        variableNames=output,
-                        interval=output_interval)
-
     time = start_time
+
+    apply_start_values(fmu, model_description, start_values, apply_default_start_values)
+
+    # initialize the model
+    if model_description.fmiVersion == '1.0':
+        input.apply(time)
+        fmu.initialize()
+    else:
+        fmu.enterInitializationMode()
+        input.apply(time)
+        fmu.exitInitializationMode()
+
+    recorder = Recorder(fmu=fmu, modelDescription=model_description, variableNames=output, interval=output_interval)
+
+    n_steps = 0
 
     # simulation loop
     while time < stop_time:
@@ -721,7 +845,8 @@ def simulateCS(model_description, fmu_kwargs, start_time, stop_time, start_value
         if step_finished is not None and not step_finished(time, recorder):
             break
 
-        time += output_interval
+        n_steps += 1
+        time = n_steps * output_interval
 
     recorder.sample(time, force=True)
 

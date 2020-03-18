@@ -86,7 +86,7 @@ def printLogMessage(component, instanceName, status, category, message):
     """ Print the FMU's log messages to the command line (works for both FMI 1.0 and 2.0) """
 
     label = ['OK', 'WARNING', 'DISCARD', 'ERROR', 'FATAL', 'PENDING'][status]
-    print("[%s] %s" % (label, message))
+    print("[%s] %s" % (label, message.decode("utf-8")))
 
 
 def allocateMemory(nobj, size):
@@ -130,11 +130,18 @@ class _FMU(object):
         else:
             library_dir = os.path.dirname(libraryPath)
 
+        # check if shared library exists
+        if not os.path.isfile(libraryPath):
+            raise Exception("Cannot find shared library %s." % libraryPath)
+
         # change to the library directory as some DLLs expect this to resolve dependencies
         os.chdir(library_dir)
 
         # load the shared library
-        self.dll = cdll.LoadLibrary(libraryPath)
+        try:
+            self.dll = cdll.LoadLibrary(libraryPath)
+        except Exception as e:
+            raise Exception("Failed to load shared library %s. %s" % (libraryPath, e))
 
         # change back to the working directory
         os.chdir(work_dir)
@@ -160,8 +167,9 @@ class _FMU(object):
             a = n + '='
 
             if t == c_void_p:
-                # component pointer
-                a += hex(v)
+                if isinstance(v, c_void_p):
+                    v = v.value
+                a += hex(0 if v is None else v)
             elif t == POINTER(c_uint):
                 # value references
                 a += '[' + ', '.join(map(str, v)) + ']'
@@ -181,6 +189,9 @@ class _FMU(object):
                 else:
                     # struct
                     a += str(v._obj)
+            elif hasattr(v, 'decode'):
+                # UTF-8 byte string
+                a += '"' + v.decode('utf-8') + '"'
             else:
                 a += str(v)
 
@@ -207,7 +218,7 @@ class _FMU(object):
             else:
                 f += str(res)
         elif restype == c_void_p:
-            f += ' -> ' + hex(res)
+            f += ' -> ' + hex(0 if res is None else res)
 
         self.fmiCallLogger(f)
 
@@ -257,7 +268,7 @@ class _FMU1(_FMU):
                            ['component', 'vr', 'nvr', 'value'],
                            [fmi1Component, POINTER(fmi1ValueReference), c_size_t, POINTER(fmi1String)])
 
-    def _fmi1Function(self, name, argnames, argtypes, restype=fmi1Status):
+    def _fmi1Function(self, fname, argnames, argtypes, restype=fmi1Status):
         """ Add an FMI 1.0 function to this instance and add a wrapper that allows
         logging and checks the return code if the return type if fmi1Status
 
@@ -269,7 +280,7 @@ class _FMU1(_FMU):
         """
 
         # get the exported function form the shared library
-        f = getattr(self.dll, self.modelIdentifier + '_fmi' + name)
+        f = getattr(self.dll, self.modelIdentifier + '_fmi' + fname)
         f.argtypes = argtypes
         f.restype = restype
 
@@ -281,17 +292,17 @@ class _FMU1(_FMU):
 
             if self.fmiCallLogger is not None:
                 # log the call
-                self._log_fmi_args('fmi' + name, argnames, argtypes, args, restype, res)
+                self._log_fmi_args('fmi' + fname, argnames, argtypes, args, restype, res)
 
             if restype == fmi1Status:
                 # check the status code
                 if res > fmi1Warning:
-                    raise Exception("FMI call failed with status %d." % res)
+                    raise Exception("fmi%s failed with status %d." % (fname, res))
 
             return res
 
         # add the function to the instance
-        setattr(self, 'fmi1' + name, w)
+        setattr(self, 'fmi1' + fname, w)
 
     # Inquire version numbers of header files
 
@@ -594,6 +605,9 @@ class FMU1Model(_FMU1):
                                                    self.guid.encode('UTF-8'),
                                                    self.callbacks,
                                                    fmi1True if loggingOn else fmi1False)
+
+        if self.component is None:
+            raise Exception("Failed to instantiate model")
 
     def freeInstance(self):
         self.fmi1FreeModelInstance(self.component)

@@ -1,8 +1,7 @@
-[![Travis CI](https://travis-ci.org/CATIA-Systems/FMPy.svg?branch=master)](https://travis-ci.org/CATIA-Systems/FMPy)
-[![AppVeyor](https://ci.appveyor.com/api/projects/status/github/CATIA-Systems/FMPy?branch=master&svg=true)](https://ci.appveyor.com/project/TorstenSommer/fmpy)
-[![PyPI version](https://badge.fury.io/py/fmpy.svg)](https://badge.fury.io/py/fmpy)
-[![Anaconda-Server Badge](https://anaconda.org/conda-forge/fmpy/badges/version.svg)](https://anaconda.org/conda-forge/fmpy)
-[![Documentation Status](https://readthedocs.org/projects/fmpy/badge/?version=latest)](http://fmpy.readthedocs.io/en/latest/?badge=latest)
+[![Build Status](https://dev.azure.com/CATIA-Systems/FMPy/_apis/build/status/CATIA-Systems.FMPy?branchName=develop)](https://dev.azure.com/CATIA-Systems/FMPy/_build/latest?definitionId=1&branchName=develop)
+[![PyPI](https://img.shields.io/pypi/dm/FMPy.svg?label=PyPI%20downloads)](https://pypi.org/project/FMPy/)
+[![Conda](https://img.shields.io/conda/dn/conda-forge/FMPy.svg?label=Conda%20downloads)](https://anaconda.org/conda-forge/fmpy)
+[![Read the Docs](https://readthedocs.org/projects/fmpy/badge/?version=latest)](https://fmpy.readthedocs.io/)
 
 # FMPy
 
@@ -12,7 +11,9 @@ FMPy is a free Python library to simulate [Functional Mock-up Units (FMUs)](http
 - supports Co-Simulation and Model Exchange
 - runs on Windows, Linux and macOS
 - has a graphical user interface
-- compiles source code FMUs
+- compiles C code FMUs and generates [CMake](https://cmake.org/) projects for debugging
+
+Try [this Jupyter notebook](https://notebooks.azure.com/t-sommer/projects/CoupledClutches) online!
 
 ## Installation
 
@@ -33,10 +34,9 @@ You can start the FMPy GUI with `python -m fmpy.gui`
 ## Simulate an FMU in Python
 
 To follow this example download `Rectifier.fmu` for your platform by clicking on the respective link:
-[Linux](https://trac.fmi-standard.org/export/HEAD/branches/public/Test_FMUs/FMI_2.0/CoSimulation/linux64/MapleSim/2017/Rectifier/Rectifier.fmu),
-[macOS](https://trac.fmi-standard.org/export/HEAD/branches/public/Test_FMUs/FMI_2.0/CoSimulation/darwin64/MapleSim/2017/Rectifier/Rectifier.fmu),
-[Windows (32-bit)](https://trac.fmi-standard.org/export/HEAD/branches/public/Test_FMUs/FMI_2.0/CoSimulation/win32/MapleSim/2017/Rectifier/Rectifier.fmu),
-[Windows (64-bit)](https://trac.fmi-standard.org/export/HEAD/branches/public/Test_FMUs/FMI_2.0/CoSimulation/win64/MapleSim/2017/Rectifier/Rectifier.fmu).
+[Linux](https://github.com/modelica/fmi-cross-check/raw/master/fmus/2.0/cs/linux64/MapleSim/2018/Rectifier/Rectifier.fmu),
+[macOS](https://github.com/modelica/fmi-cross-check/raw/master/fmus/2.0/cs/darwin64/MapleSim/2018/Rectifier/Rectifier.fmu),
+[Windows](https://github.com/modelica/fmi-cross-check/raw/master/fmus/2.0/cs/win64/MapleSim/2018/Rectifier/Rectifier.fmu).
 Change to the folder where you've saved the FMU and open a Python prompt.
 
 ```
@@ -99,6 +99,12 @@ To learn more about how to use FMPy in you own scripts take a look at the
 [coupled_clutches.py](fmpy/examples/coupled_clutches.py),
 [custom_input.py](fmpy/examples/custom_input.py) and
 [parameter_variation.py](fmpy/examples/parameter_variation.py) examples.
+
+## Commercial Support
+
+You're starting a project, need training or professional support?
+Our partners at LTX Simulation are ready to help you.
+Please send an e-mail to support@ltx.de for a quote.
 
 ------------------------------------
 

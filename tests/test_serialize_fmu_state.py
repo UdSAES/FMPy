@@ -12,7 +12,7 @@ class SerializeFMUStateTest(unittest.TestCase):
         fmu_filename = 'Rectifier.fmu'
 
         # download the FMU
-        download_test_file('2.0', 'CoSimulation', 'MapleSim', '2017', 'Rectifier', fmu_filename)
+        download_test_file('2.0', 'cs', 'MapleSim', '2016.2', 'Rectifier', fmu_filename)
 
         # read the model description
         model_description = read_model_description(fmu_filename)
@@ -37,14 +37,14 @@ class SerializeFMUStateTest(unittest.TestCase):
         # serialize the FMU state
         serialized_state = fmu.serializeFMUstate(state)
 
-        # de-serialize the FMU state
-        fmu.deSerializeFMUstate(serialized_state, state)
+        # de-serialize the FMU state (re-using memory)
+        deserialized_state = fmu.deSerializeFMUstate(serialized_state, state)
 
         # set the FMU state
-        fmu.setFMUstate(state)
+        fmu.setFMUstate(deserialized_state)
 
         # free the FMU state
-        fmu.freeFMUstate(state)
+        fmu.freeFMUstate(deserialized_state)
 
         fmu.terminate()
         fmu.freeInstance()

@@ -194,7 +194,7 @@ class VariablesTreeModel(VariablesModel):
 
     def setModelDescription(self, md):
 
-        self.rootItem.children.clear()
+        self.rootItem.children[:] = []
 
         for variable in md.modelVariables:
 
@@ -205,7 +205,8 @@ class VariablesTreeModel(VariablesModel):
             else:
                 prefix = suffix = ''
 
-            segments = name.split('.')
+            # split and remove single quotes from segments
+            segments = [s[1:-1] if s.startswith("'") and s.endswith("'") else s for s in name.split('.')]
 
             parentItem = self.rootItem
 

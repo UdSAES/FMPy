@@ -1,3 +1,120 @@
+## v0.2.17 (2020-02-04)
+
+- `NEW` "Clear Plots" action has been added to the context menu
+- `IMPROVED` single quotes are now removed from name segments in the tree view
+- `IMPROVED` a RuntimeError is raised when an errors occurs in CVode
+- `IMPROVED` exceptions are raised for undefined declaredType, illegal combinations of causality and variability, and missing shared libraries
+- `IMPROVED` communicationPoint is now calculated as n_steps * step_size to avoid accumulation of numerical errors
+
+## v0.2.16 (2019-12-26)
+
+- `FIXED` pre-compiled SUNDIALS libraries re-added
+
+## v0.2.15 (2019-12-18)
+
+- `FIXED` validation of structured variable names with apostrophes
+- `FIXED` dimensions of variables in FMI 3
+- `NEW` validation of "flat" variable names
+- `UPDATED` FMI 3 schema files
+- `UPDATED` CVode 5.0
+- `IMPROVED` optional files added to CMake projects for source FMUs
+- `IMPROVED` NULL pointers are now ignored in freeMemory()
+- `IMPROVED` frequently used utility functions are now imported to fmpy module
+- `IMPROVED` parameter_variation adapted to new Dask versions
+
+## v0.2.14 (2019-10-23)
+
+Improved validation & --visible option for CLI
+
+- `FIXED` "Load Start Values" only enabled when FMU can be simulated
+- `NEW` --visible option in CLI
+- `NEW` XML line numbers added to validation messages
+- `NEW` validation of variables names for naming convention "structured"
+- `IMPROVED` visible=fmi2True when simulating in GUI
+
+## v0.2.13 (2019-09-16)
+
+Extended FMI 3.0 alpha 2 support & improved GUI
+
+- `NEW` check for illegal filenames in FMU archives
+- `NEW` reload button in GUI
+- `IMPROVED` extended FMI 3.0 alpha 2 support
+- `CHANGED` increased max. filesize for Cross-Check FMUs
+
+## v0.2.12 (2019-07-15)
+
+Support for FMI 3.0 Alpha 1, output interval in GUI
+
+- `FIXED` compilation of platform binary on Windows 32-bit
+- `IMPROVED` support for FMI 3.0 Alpha 1
+- `IMPROVED` output interval can now be set in the GUI
+- `IMPROVED` output interval is now calculated based on stepSize attribute
+
+## v0.2.11 (2019-05-27)
+
+FMPy 0.2.11: improved robustness and validation
+
+- `FIXED` leading spaces in dependency list are now handled correctly
+- `FIXED` input files with only one sample can now be handled
+- `IMPROVED` errors during cleanup of temporary directories are now ignored
+- `IMPROVED` "Relative Tolerance" input field is now enabled for Co-Simulation FMUs
+- `IMPROVED` compilation of source code FMUs is now more robust
+- `IMPROVED` combinations of causality and variability are now validated
+- `IMPROVED` assertions for required start values have been added
+- `IMPROVED` assertions for unique variable names have been added
+
+## v0.2.10 (2019-02-26)
+
+Experimental FMI 3.0 support, FMI Cross-Check validation scripts
+
+- `FIXED` set start values before entering initialization mode
+- `NEW` experimental FMI 3.0 support
+- `NEW` FMI Cross-Check validation scripts to validate FMUs and results
+- `IMPROVED` handling of reference signals with duplicate sample times
+
+## v0.2.9 (2019-02-07)
+
+Improved logging, discrete inputs and tunable parameters
+
+- `FIXED` handling of discrete inputs
+- `FIXED` set continuous states after solver step
+- `NEW` set tunable parameters via input
+- `IMPROVED` disable inactive root warnings for CVode
+- `IMPROVED` error and log messages
+- `IMPROVED` plotting of discrete signals
+
+## v0.2.8 (2018-12-24)
+
+- `FIXED` Handle optional elements in ScalarVariable tag
+- `FIXED` Handle null pointers in FMI logging
+- `FIXED` Relax type of attribute "version" in fmiModelDescription.xsd to "normalizedString"
+- `FIXED` Fix size of memory passed to fmi2DeSerializeFMUstate()
+- `NEW` Validate modelDescription.outputs
+- `NEW` Add compilation with Visual Studio 2017
+- `NEW` Add missing attributes to ScalarVariable and validate derivatives and units
+- `NEW` Change input extrapolation to "hold"
+
+## v0.2.7 (2018-11-13)
+
+- `FIXED` Test files are now downloaded form GitHub
+- `FIXED` Compilation of model exchange FMUs works now
+- `NEW` --relative-tolerance parameter is now passed to FMI 2.0 co-simulation FMUs
+- `NEW` Platform binary can now be compiled from within the GUI (Help > Compile Platform Binary)
+
+## v0.2.6 (2018-09-04)
+
+- `NEW` CMake project generation for C code FMUs
+- `NEW` Read Enumeration items from modelDescription.xml
+- `FIXED` GUI with Python 2.7
+
+## v0.2.5 (2018-06-17)
+
+Improved handling of input signals
+
+- input is now applied before initialization for co-simulation
+- "time" column for input signals can now have an arbitrary name
+
+
 ## v0.2.4 (2018-05-22)
 
 - `NEW` Remaining FMI functions added

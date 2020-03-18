@@ -7,12 +7,13 @@ class ValidationError(Exception):
     pass
 
 
-def read_csv(filename, variable_names=[], validate=True):
+def read_csv(filename, variable_names=[], validate=True, structured=False):
     """ Read a CSV file that conforms to the FMI cross-check rules
 
     Parameters:
         filename         name of the CSV file to read
         variable_names   list of variables to read (default: read all)
+        structured       convert structured names to arrays
 
     Returns:
         traj             the trajectories read from the CSV file
@@ -20,6 +21,30 @@ def read_csv(filename, variable_names=[], validate=True):
 
     # pass an empty string as deletechars to preserve special characters
     traj = np.genfromtxt(filename, delimiter=',', names=True, deletechars='')
+
+    if structured:
+        arrays = {}
+
+        cols = []
+        traj_ = []
+
+        for name, type_ in traj.dtype.descr:
+            if name.endswith(']'):
+                i = name.rfind('[')
+                basename = name[:i]
+                if basename not in arrays:
+                    arrays[basename] = []
+                arrays[basename].append((int(name[i + 1:-1]) - 1, traj[name]))
+            else:
+                cols.append((name, type_))
+                traj_.append(traj[name].tolist())
+
+        for name, value in arrays.items():
+            subs, arrs = zip(*value)
+            cols.append((name, '<f8', (max(subs) + 1,)))
+            traj_.append(list(zip(*arrs)))
+
+        traj = np.array(list(zip(*traj_)), dtype=np.dtype(cols))
 
     if not validate:
         return traj
@@ -53,6 +78,27 @@ def write_csv(filename, result, columns=None):
 
     if columns is not None:
         result = result[['time'] + columns]
+
+    # serialize multi-dimensional signals
+    cols = []
+    data = []
+
+    for descr in result.dtype.descr:
+        if len(descr) > 2:
+            name, type_, shape = descr
+            y = result[name]
+            for i in np.ndindex(shape):
+                # convert index to 1-based subscripts
+                subs = ','.join(map(lambda sub: str(sub + 1), i))
+                cols.append(('%s[%s]' % (name, subs), type_))
+                sl = [slice(0, None)] + [slice(s, s + 1) for s in i]
+                data.append(y[sl].flatten())
+        else:
+            name, _ = descr
+            cols.append(descr)
+            data.append(result[name])
+
+    result = np.array(list(zip(*data)), dtype=np.dtype(cols))
 
     header = ','.join(map(lambda s: '"' + s + '"', result.dtype.names))
     np.savetxt(filename, result, delimiter=',', header=header, comments='', fmt='%g')
@@ -109,14 +155,18 @@ def validate_signal(t, y, t_ref, y_ref, num=1000, dx=20, dy=0.1):
     """
 
     from scipy.ndimage.filters import maximum_filter1d, minimum_filter1d
+    from scipy.interpolate import interp1d
 
     # re-sample the reference signal into a uniform grid
     t_band = np.linspace(start=t_ref[0], stop=t_ref[-1], num=num)
 
-    # sort out the duplicate samples before the interpolation
-    m = np.concatenate(([True], np.diff(t_ref) > 0))
+    # make t_ref strictly monotonic by adding epsilon to duplicate sample times
+    for i in range(1, len(t_ref)):
+        while t_ref[i - 1] >= t_ref[i]:
+            t_ref[i] = t_ref[i] + 1e-13
 
-    y_band = np.interp(x=t_band, xp=t_ref[m], fp=y_ref[m])
+    interp_method = 'linear' if y.dtype == np.float64 else 'zero'
+    y_band = interp1d(x=t_ref, y=y_ref, kind=interp_method)(t_band)
 
     y_band_min = np.min(y_band)
     y_band_max = np.max(y_band)
@@ -213,6 +263,7 @@ def plot_result(result, reference=None, names=None, filename=None, window_title=
     import matplotlib.pylab as pylab
     import matplotlib.pyplot as plt
     import matplotlib.transforms as mtransforms
+    from matplotlib.ticker import MaxNLocator
     from collections import Iterable
 
     params = {
@@ -274,17 +325,24 @@ def plot_result(result, reference=None, names=None, filename=None, window_title=
                 ax.fill_between(time, 0, 1, where=i_out, facecolor='red', alpha=0.5, transform=trans)
 
             if y.dtype == np.float64:
-                ax.plot(time, y, color='b', linewidth=0.9, label='result', zorder=101)
+                # find left indices of discontinuities
+                i_disc = np.flatnonzero(np.diff(time) == 0)
+                i_disc = np.append(i_disc + 1, len(time))
+                i0 = 0
+                for i1 in i_disc:
+                    ax.plot(time[i0:i1], y[i0:i1], color='b', linewidth=0.9, label='result', zorder=101)
+                    i0 = i1
             else:
-                ax.hlines(y, time[:-1], time[1:], colors='b', linewidth=1, label='result', zorder=101)
-                # ax.step(time, y, where='post', color='b', linewidth=0.9, label='result', zorder=101)
+                ax.hlines(y[:-1], time[:-1], time[1:], colors='b', linewidth=1, label='result', zorder=101)
+                ax.yaxis.set_major_locator(MaxNLocator(integer=True))
 
             if y.dtype == bool:
                 # use fixed range and labels and fill area
                 ax.set_ylim(-0.25, 1.25)
                 ax.yaxis.set_ticks([0, 1])
                 ax.yaxis.set_ticklabels(['false', 'true'])
-                ax.fill_between(time, y, 0, step='post', facecolor='b', alpha=0.1)
+                if y.ndim == 1:
+                    ax.fill_between(time, y, 0, step='post', facecolor='b', alpha=0.1)
             else:
                 ax.margins(x=0, y=0.05)
 
@@ -394,7 +452,7 @@ def download_file(url, checksum=None):
                 response = requests.get(url)
                 status_code = response.status_code
     except:
-        pass
+        pass  # ignore
 
     if status_code != 200:
         raise Exception("Failed to download %s (status code: %d)" % (url, status_code))
@@ -403,15 +461,26 @@ def download_file(url, checksum=None):
     with open(filename, 'wb') as f:
         f.write(response.content)
 
+    if checksum is not None:
+        hash = sha256_checksum(filename)
+        if not hash.startswith(checksum):
+            raise Exception("%s has the wrong SHA256 checksum. Expected %s but was %s." % (filename, checksum, hash))
+
 
 def download_test_file(fmi_version, fmi_type, tool_name, tool_version, model_name, filename):
     """ Download a file from the Test FMUs repository to the current directory """
 
     from . import platform
 
+    # for backwards compatibility
+    if fmi_type == 'ModelExchange':
+        fmi_type = 'me'
+    elif fmi_type == 'CoSimulation':
+        fmi_type = 'cs'
+
     # build the URL
-    url = 'https://trac.fmi-standard.org/export/HEAD/branches/public/Test_FMUs/FMI_' + fmi_version
-    url = '/'.join([url, fmi_type, platform, tool_name, tool_version, model_name, filename])
+    url = 'https://github.com/modelica/fmi-cross-check/raw/master/fmus'
+    url = '/'.join([url, fmi_version, fmi_type, platform, tool_name, tool_version, model_name, filename])
 
     download_file(url)
 
@@ -441,9 +510,9 @@ def fmu_info(filename, causalities=['input', 'output']):
     l.append("  Model Name        %s" % md.modelName)
     l.append("  Description       %s" % md.description)
     l.append("  Platforms         %s" % ', '.join(platforms))
-    l.append("  Continuous States %d" % md.numberOfContinuousStates)
-    l.append("  Event Indicators  %d" % md.numberOfEventIndicators)
-    l.append("  Variables         %d" % len(md.modelVariables))
+    l.append("  Continuous States %s" % md.numberOfContinuousStates)
+    l.append("  Event Indicators  %s" % md.numberOfEventIndicators)
+    l.append("  Variables         %s" % len(md.modelVariables))
     l.append("  Generation Tool   %s" % md.generationTool)
     l.append("  Generation Date   %s" % md.generationDateAndTime)
 
@@ -491,6 +560,23 @@ def fmu_info(filename, causalities=['input', 'output']):
     return '\n'.join(l)
 
 
+def visual_studio_installation_path():
+    """ Get the VisualStudio 2017 installation path """
+
+    try:
+        from subprocess import Popen, PIPE
+        import os
+        vswhere = '"' + os.environ['ProgramFiles(x86)'] + r'\Microsoft Visual Studio\Installer\vswhere.exe"'
+        command = vswhere +  ' -latest -products * -requires Microsoft.Component.MSBuild -property installationPath'
+        proc = Popen(command, stdout=PIPE)
+        output, _ = proc.communicate()
+        return output.decode('utf-8').strip()
+    except Exception as e:
+        pass  # do noting
+
+    return None
+
+
 def visual_c_versions():
     """ Detect installed Visual C compilers
 
@@ -499,9 +585,19 @@ def visual_c_versions():
 
     versions = []
 
+    # up to Visual Studio 2015
     for key in os.environ.keys():
         if key.upper().startswith('VS') and key.upper().endswith('COMNTOOLS'):
             versions.append(int(key[len('VS'):-len('COMNTOOLS')]))
+
+    # Visual Studio 2017
+    installation_path = visual_studio_installation_path()
+
+    if installation_path is not None:
+        if '2017' in installation_path:
+            versions.append(150)
+        if '2019' in installation_path:
+            versions.append(160)
 
     return sorted(versions)
 
@@ -530,28 +626,28 @@ def compile_dll(model_description, sources_dir, compiler=None):
 
     source_files = []
 
-    if model_description.coSimulation is not None:
-        model_identifier = model_description.coSimulation.modelIdentifier
-        preprocessor_definitions.append('CO_SIMULATION')
-        source_files += model_description.coSimulation.sourceFiles
+    if len(model_description.buildConfigurations) == 0:
+        raise Exception("No build configuration found.")
 
-    if model_description.modelExchange is not None:
-        model_identifier = model_description.modelExchange.modelIdentifier
-        preprocessor_definitions.append('MODEL_EXCHANGE')
-        for source_file in model_description.modelExchange.sourceFiles:
-            if source_file not in source_files:
-                source_files += source_file
+    build_configuration = model_description.buildConfigurations[0]
+
+    if len(build_configuration.sourceFileSets) > 1:
+        raise Exception("More than one SourceFileSet is not supported.")
+
+    source_file_set = build_configuration.sourceFileSets[0]
+
+    source_files += source_file_set.sourceFiles
+
+    for definition in source_file_set.preprocessorDefinitions:
+        literal = definition.name
+        if definition.value is not None:
+            literal += '=' + definition.value
+        preprocessor_definitions.append(literal)
 
     if len(source_files) == 0:
         raise Exception("No source files specified in the model description.")
 
-    source_files += [os.path.join(include_dir, 'fmi2', 'fmi2_wrapper.c')]
-
-    preprocessor_definitions.append('FMI2_FUNCTION_PREFIX=' + model_identifier + '_')
-
-    fmi_include_dir = os.path.join(include_dir, 'fmi1' if model_description.fmiVersion == '1.0' else 'fmi2')
-
-    target = model_identifier + sharedLibraryExtension
+    target = build_configuration.modelIdentifier + sharedLibraryExtension
 
     print('Compiling %s...' % target)
 
@@ -562,20 +658,31 @@ def compile_dll(model_description, sources_dir, compiler=None):
         if len(vc_versions) == 0:
             raise Exception("No VisualStudio found")
 
-        command = r'call "%%VS%dCOMNTOOLS%%\..\..\VC\vcvarsall.bat"' % vc_versions[-1]
+        # use the latest version
+        vc_version = vc_versions[-1]
+
+        if vc_version < 150:
+            command = r'call "%%VS%dCOMNTOOLS%%\..\..\VC\vcvarsall.bat"' % vc_version
+        else:
+            installation_path = visual_studio_installation_path()
+            command = 'call "' + installation_path + r'\VC\Auxiliary\Build\vcvarsall.bat"'
+
         if platform == 'win64':
             command += ' x86_amd64'
-        command += ' && cl /LD /I. /I"%s"' % fmi_include_dir
+        else:
+            command += ' x86'
+
+        command += ' && cl /LD /I. /I"%s"' % include_dir
         for definition in preprocessor_definitions:
             command += ' /D' + definition
-        command += ' /Fe' + model_identifier + ' shlwapi.lib ' + ' '.join(source_files)
+        command += ' /Fe' + build_configuration.modelIdentifier + ' shlwapi.lib ' + ' '.join(source_files)
 
     elif compiler == 'gcc':
 
         command = ''
         if platform.startswith('win'):
             command += r'set PATH=C:\MinGW\bin;%%PATH%% && '
-        command += 'gcc -c -I. -I%s' % fmi_include_dir
+        command += 'gcc -c -I. -I%s' % include_dir
         if platform in ['linux32', 'linux64']:
             command += ' -fPIC'
         for definition in preprocessor_definitions:
@@ -613,22 +720,19 @@ def compile_platform_binary(filename, output_filename=None):
         output_filename:  filename of the FMU with the compiled binary (None: overwrite existing FMU)
     """
 
-    from . import read_model_description, extract, platform
+    from . import read_model_description, extract, platform, platform_tuple
     import zipfile
     from shutil import copyfile, rmtree
 
     unzipdir = extract(filename)
 
-    md = read_model_description(filename)
+    model_description = read_model_description(filename)
 
-    binary = compile_dll(model_description=md, sources_dir=os.path.join(unzipdir, 'sources'))
+    binary = compile_dll(model_description=model_description, sources_dir=os.path.join(unzipdir, 'sources'))
 
     unzipdir2 = extract(filename)
 
-    platform_dir = os.path.join(unzipdir2, 'binaries', platform)
-
-    # if os.path.exists(platform_dir):
-    #     rmtree(platform_dir)
+    platform_dir = os.path.join(unzipdir2, 'binaries', platform if model_description.fmiVersion in ['1.0', '2.0'] else platform_tuple)
 
     if not os.path.exists(platform_dir):
         os.makedirs(platform_dir)
@@ -651,8 +755,8 @@ def compile_platform_binary(filename, output_filename=None):
                     zf.write(path, os.path.relpath(path, base_path))
 
     # clean up
-    rmtree(unzipdir)
-    rmtree(unzipdir2)
+    rmtree(unzipdir, ignore_errors=True)
+    rmtree(unzipdir2, ignore_errors=True)
 
 
 def auto_interval(t):
@@ -721,7 +825,7 @@ def change_fmu(input_file, output_file=None, start_values={}):
                     zf.write(path, os.path.relpath(path, base_path))
 
     # clean up
-    rmtree(tempdir)
+    rmtree(tempdir, ignore_errors=True)
 
 
 def get_start_values(filename):
@@ -798,6 +902,68 @@ def get_start_values(filename):
     fmu.freeInstance()
 
     # clean up
-    rmtree(unzipdir)
+    rmtree(unzipdir, ignore_errors=True)
 
     return start_values
+
+
+def create_cmake_project(filename, project_dir):
+    """ Create a CMake project from a C code FMU
+
+    Parameters:
+
+        filename     filename of the C code FMU
+        project_dir  existing directory for the CMake project
+    """
+
+    from zipfile import ZipFile
+    from fmpy import read_model_description, extract
+
+    model_description = read_model_description(filename)
+
+    extract(filename, unzipdir=project_dir)
+
+    fmpy_dir = os.path.dirname(__file__)
+    source_dir = os.path.join(fmpy_dir, 'c-code')
+
+    with open(os.path.join(source_dir, 'CMakeLists.txt'), 'r') as cmake_file:
+        txt = cmake_file.read()
+
+    definitions = []
+
+    if model_description.coSimulation is not None:
+        definitions.append('CO_SIMULATION')
+
+    if model_description.modelExchange is not None:
+        definitions.append('MODEL_EXCHANGE')
+
+    with ZipFile(filename, 'r') as archive:
+        # don't add the current directory
+        resources = list(filter(lambda n: not n.startswith('.'), archive.namelist()))
+
+    # always add the binaries
+    resources.append('binaries')
+
+    # use the first source file set of the first build configuration
+    build_configuration = model_description.buildConfigurations[0]
+    source_file_set = build_configuration.sourceFileSets[0]
+
+    sources = ['sources/' + file for file in source_file_set.sourceFiles]
+
+    # substitute the variables
+    txt = txt.replace('%MODEL_NAME%', model_description.modelName)
+    txt = txt.replace('%MODEL_IDENTIFIER%', build_configuration.modelIdentifier)
+    txt = txt.replace('%DEFINITIONS%', ' '.join(definitions))
+    txt = txt.replace('%INCLUDE_DIRS%', '"' + source_dir.replace('\\', '/') + '"')
+    txt = txt.replace('%SOURCES%', ' '.join(sources))
+    txt = txt.replace('%RESOURCES%', '\n    '.join('"' + r + '"' for r in resources))
+
+    with open(os.path.join(project_dir, 'CMakeLists.txt'), 'w') as outfile:
+        outfile.write(txt)
+
+
+def _is_string(s):
+    """ Python 2 and 3 compatible type check for strings """
+    
+    import sys
+    return isinstance(s, basestring if sys.version_info[0] == 2 else str)

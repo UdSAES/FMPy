@@ -11,13 +11,15 @@ class ModelDescription(object):
         self.generationTool = None
         self.generationDateAndTime = None
         self.variableNamingConvention = 'flat'
-        self.numberOfContinuousStates = None
-        self.numberOfEventIndicators = None
+        self.numberOfContinuousStates = 0
+        self.numberOfEventIndicators = 0
 
         self.defaultExperiment = None
 
         self.coSimulation = None
         self.modelExchange = None
+
+        self.buildConfigurations = []
 
         self.unitDefinitions = []
         self.typeDefinitions = []
@@ -51,7 +53,6 @@ class CoSimulation(object):
         self.canGetAndSetFMUstate = False
         self.canSerializeFMUstate = False
         self.providesDirectionalDerivative = False
-        self.sourceFiles = []
 
 
 class ModelExchange(object):
@@ -65,7 +66,40 @@ class ModelExchange(object):
         self.canGetAndSetFMUstate = False
         self.canSerializeFMUstate = False
         self.providesDirectionalDerivative = False
+
+
+class BuildConfiguration(object):
+
+    def __init__(self):
+        self.modelIdentifier = None
+        self.sourceFileSets = []
+
+    def __repr__(self):
+        return 'BuildConfiguration %s' % self.sourceFileSets
+
+
+class PreProcessorDefinition(object):
+
+    def __init__(self):
+        self.name = None
+        self.value = None
+        self.optional = False
+        self.description = None
+
+    def __repr__(self):
+        return '%s=%s' % (self.name, self.value)
+
+
+class SourceFileSet(object):
+
+    def __init__(self):
+        self.language = None
+        self.preprocessorDefinitions = []
         self.sourceFiles = []
+        self.includeDirectories = []
+
+    def __repr__(self):
+        return '%s %s' % (self.language, self.sourceFiles)
 
 
 class ScalarVariable(object):
@@ -78,9 +112,41 @@ class ScalarVariable(object):
         self.type = None
         "One of 'Real', 'Integer', 'Enumeration', 'Boolean', 'String'"
 
+        self.dimensions = None
+        "List of fixed dimensions"
+
+        self.dimensionValueReferences = []
+        "List of value references to the variables that hold the dimensions"
+
+        self.quantitiy = None
+        "Physical quantity"
+
         self.unit = None
+        "Unit"
+
+        self.displayUnit = None
+        "Default display unit"
+
+        self.relativeQuantity = False
+        "Relative quantity"
+
+        self.min = None
+        "Minimum value"
+
+        self.max = None
+        "Maximum value"
+
+        self.nominal = None
+        "Nominal value"
+
+        self.unbounded = False
+        "Value is unbounded"
 
         self.start = None
+        "Initial or guess value"
+
+        self.derivative = None
+        "Derivative"
 
         self.causality = None
         "One of 'parameter', 'calculatedParameter', 'input', 'output', 'local', 'independent'"
@@ -93,26 +159,46 @@ class ScalarVariable(object):
 
         self.declaredType = None
 
+        self.reinit = False
+        "Can be reinitialized at an event by the FMU"
+
+        self.sourceline = None
+        "Line number in the modelDescription.xml or None if unknown"
+
     def __repr__(self):
         return '%s "%s"' % (self.type, self.name)
 
 
 class SimpleType(object):
+    """ Type Definition """
 
-    def __init__(self, name, type):
-        self.name = name
-        self.type = type
-        self.quantity = None
-        self.unit = None
-        self.displayUnit = None
-        self.relativeQuantity = None
-        self.min = None
-        self.max = None
-        self.nominal = None
-        self.unbounded = None
+    def __init__(self, **kwargs):
+        self.name = kwargs.get('name')
+        self.type = kwargs.get('type')
+        self.quantity = kwargs.get('quantity')
+        self.unit = kwargs.get('unit')
+        self.displayUnit = kwargs.get('displayUnit')
+        self.relativeQuantity = kwargs.get('relativeQuantity')
+        self.min = kwargs.get('min')
+        self.max = kwargs.get('max')
+        self.nominal = kwargs.get('nominal')
+        self.unbounded = kwargs.get('unbounded')
+        self.items = kwargs.get('items', [])
 
     def __repr__(self):
         return '%s "%s" [%s]' % (self.type, self.name, self.unit)
+
+
+class Item(object):
+    """ Enumeration Item """
+
+    def __init__(self, **kwargs):
+        self.name = kwargs.get('name')
+        self.value = kwargs.get('value')
+        self.description = kwargs.get('description')
+
+    def __repr__(self):
+        return '%s (%s) %s' % (self.name, self.value, self.description)
 
 
 class Unit(object):
@@ -192,12 +278,13 @@ def _copy_attributes(element, object, attributes):
         setattr(object, attribute, value)
 
 
-def read_model_description(filename, validate=True):
+def read_model_description(filename, validate=True, validate_variable_names=False):
     """ Read the model description from an FMU without extracting it
 
     Parameters:
-        filename   filename of the FMU or directory with extracted FMU
-        validate   whether the model description should be validated
+        filename                 filename of the FMU or XML file, directory with extracted FMU or file like object
+        validate                 whether the model description should be validated
+        validate_variable_names  validate the variable names against the EBNF
 
     returns:
         model_description   a ModelDescription object
@@ -206,12 +293,14 @@ def read_model_description(filename, validate=True):
     import zipfile
     from lxml import etree
     import os
+    from .util import _is_string
 
-    xml_file = os.path.join(filename, 'modelDescription.xml')
-
-    if os.path.isfile(xml_file):
-        tree = etree.parse(xml_file)
-    else:
+    if _is_string(filename) and os.path.isdir(filename):  # extracted FMU
+        filename = os.path.join(filename, 'modelDescription.xml')
+        tree = etree.parse(filename)
+    elif _is_string(filename) and os.path.isfile(filename) and filename.lower().endswith('.xml'):  # XML file
+        tree = etree.parse(filename)
+    else:  # FMU as path or file like object
         with zipfile.ZipFile(filename, 'r') as zf:
             xml = zf.open('modelDescription.xml')
             tree = etree.parse(xml)
@@ -220,7 +309,7 @@ def read_model_description(filename, validate=True):
 
     fmiVersion = root.get('fmiVersion')
 
-    if fmiVersion not in ['1.0', '2.0']:
+    if not fmiVersion.startswith('3.0') and fmiVersion not in ['1.0', '2.0']:
         raise Exception("Unsupported FMI version: %s" % fmiVersion)
 
     if validate:
@@ -229,8 +318,10 @@ def read_model_description(filename, validate=True):
 
         if fmiVersion == '1.0':
             schema = etree.XMLSchema(file=os.path.join(module_dir, 'schema', 'fmi1', 'fmiModelDescription.xsd'))
-        else:
+        elif fmiVersion == '2.0':
             schema = etree.XMLSchema(file=os.path.join(module_dir, 'schema', 'fmi2', 'fmi2ModelDescription.xsd'))
+        else:
+            schema = etree.XMLSchema(file=os.path.join(module_dir, 'schema', 'fmi3', 'fmi3ModelDescription.xsd'))
 
         if not schema.validate(root):
             message = "Failed to validate modelDescription.xml:"
@@ -242,13 +333,18 @@ def read_model_description(filename, validate=True):
     _copy_attributes(root, modelDescription, ['fmiVersion', 'guid', 'modelName', 'description', 'generationTool',
                                               'generationDateAndTime', 'variableNamingConvention'])
 
+    if fmiVersion.startswith('3.0'):
+        modelDescription.guid = root.get('instantiationToken')
+
     if root.get('numberOfEventIndicators') is not None:
         modelDescription.numberOfEventIndicators = int(root.get('numberOfEventIndicators'))
 
     if fmiVersion == '1.0':
         modelDescription.numberOfContinuousStates = int(root.get('numberOfContinuousStates'))
-    else:
+    elif fmiVersion == '2.0':
         modelDescription.numberOfContinuousStates = len(root.findall('ModelStructure/Derivatives/Unknown'))
+    else:
+        modelDescription.numberOfContinuousStates = len(root.findall('ModelStructure/Derivative'))
 
     # default experiment
     for d in root.findall('DefaultExperiment'):
@@ -284,8 +380,6 @@ def read_model_description(filename, validate=True):
                               'canGetAndSetFMUstate',
                               'canSerializeFMUstate',
                               'providesDirectionalDerivative'])
-            for file in me.findall('SourceFiles/File'):
-                modelDescription.modelExchange.sourceFiles.append(file.get('name'))
 
         for cs in root.findall('CoSimulation'):
             modelDescription.coSimulation = CoSimulation()
@@ -301,11 +395,59 @@ def read_model_description(filename, validate=True):
                               'canGetAndSetFMUstate',
                               'canSerializeFMUstate',
                               'providesDirectionalDerivative'])
-            for file in cs.findall('SourceFiles/File'):
-                modelDescription.coSimulation.sourceFiles.append(file.get('name'))
+
+    # build configurations
+    if fmiVersion == '2.0':
+
+        for interface_type in root.findall('ModelExchange') + root.findall('CoSimulation'):
+
+            modelIdentifier = interface_type.get('modelIdentifier')
+
+            if len(modelDescription.buildConfigurations) > 0 and modelDescription.buildConfigurations[0].modelIdentifier == modelIdentifier:
+                continue  # use existing build configuration for both FMI types
+
+            source_files = [file.get('name') for file in interface_type.findall('SourceFiles/File')]
+
+            if len(source_files) > 0:
+                buildConfiguration = BuildConfiguration()
+                modelDescription.buildConfigurations.append(buildConfiguration)
+                buildConfiguration.modelIdentifier = modelIdentifier
+                source_file_set = SourceFileSet()
+                buildConfiguration.sourceFileSets.append(source_file_set)
+                source_file_set.sourceFiles = source_files
+
+    elif fmiVersion.startswith('3.0'):
+
+        for bc in root.findall('BuildConfiguration'):
+
+            buildConfiguration = BuildConfiguration()
+            buildConfiguration.modelIdentifier = bc.get('modelIdentifier')
+
+            modelDescription.buildConfigurations.append(buildConfiguration)
+
+            for sf in bc.findall('SourceFileSet'):
+
+                sourceFileSet = SourceFileSet()
+                sourceFileSet.language = sf.get('language')
+
+                for pd in sf.findall('PreprocessorDefinition'):
+                    definition = PreProcessorDefinition()
+                    definition.name = pd.get('name')
+                    definition.value = pd.get('value')
+                    definition.optional = pd.get('optional') == 'true'
+                    definition.description = pd.get('description')
+                    sourceFileSet.preprocessorDefinitions.append(definition)
+
+                for f in sf.findall('SourceFile'):
+                    sourceFileSet.sourceFiles.append(f.get('name'))
+
+                for d in sf.findall('IncludeDirectory'):
+                    sourceFileSet.includeDirectories.append(d.get('name'))
+
+                buildConfiguration.sourceFileSets.append(sourceFileSet)
 
     # unit definitions
-    if fmiVersion == "1.0":
+    if fmiVersion == '1.0':
 
         for u in root.findall('UnitDefinitions/BaseUnit'):
             unit = Unit(name=u.get('unit'))
@@ -337,26 +479,54 @@ def read_model_description(filename, validate=True):
             modelDescription.unitDefinitions.append(unit)
 
     # type definitions
-    typeDefinitions = {None: None}
+    type_definitions = {None: None}
 
-    for t in root.findall('TypeDefinitions/' + ('Type' if fmiVersion == "1.0" else 'SimpleType')):
-        simpleType = SimpleType(name=t.get('name'), type=t[0].tag[:-len('Type')])
+    # FMI 1 and 2
+    for t in root.findall('TypeDefinitions/' + ('Type' if fmiVersion == '1.0' else 'SimpleType')):
 
-        for attribute in ['quantity', 'unit', 'displayUnit', 'relativeQuantity', 'min', 'max', 'nominal', 'unbounded']:
-            setattr(simpleType, attribute, t[0].get(attribute))
+        first = t[0]  # first element
 
-        # TODO: add enumeration items
+        simple_type = SimpleType(
+            name=t.get('name'),
+            type=first.tag[:-len('Type')] if fmiVersion == '1.0' else first.tag,
+            **first.attrib
+        )
 
-        modelDescription.typeDefinitions.append(simpleType)
-        typeDefinitions[simpleType.name] = simpleType
+        # add enumeration items
+        for i, item in enumerate(first.findall('Item')):
+            it = Item(**item.attrib)
+            if fmiVersion == '1.0':
+                it.value = i + 1
+            simple_type.items.append(it)
+
+        modelDescription.typeDefinitions.append(simple_type)
+        type_definitions[simple_type.name] = simple_type
+
+    # FMI 3
+    for t in root.findall('TypeDefinitions/*'):
+
+        if t.tag not in {'Float32', 'Float64', 'Int8', 'UInt8', 'Int16', 'UInt16', 'Int32', 'UInt32', 'Int64', 'UInt64',
+                         'Boolean', 'String', 'Binary', 'Enumeration'}:
+            continue
+
+        simple_type = SimpleType(type=t.tag, **t.attrib)
+
+        # add enumeration items
+        for item in t.findall('Item'):
+            it = Item(**item.attrib)
+            simple_type.items.append(it)
+
+        modelDescription.typeDefinitions.append(simple_type)
+        type_definitions[simple_type.name] = simple_type
 
     # default values for 'initial' derived from variability and causality
     initial_defaults = {
-        'constant':   {'output': 'exact', 'local': 'exact'},
+        'constant':   {'output': 'exact', 'local': 'exact', 'parameter': 'exact'},
         'fixed':      {'parameter': 'exact', 'calculatedParameter': 'calculated', 'local': 'calculated'},
-        'tunable':    {'parameter': 'exact', 'calculatedParameter': 'calculated', 'local': 'calculated'},
+        'tunable':    {'parameter': 'exact', 'calculatedParameter': 'calculated', 'structuralParameter': 'exact', 'local': 'calculated'},
         'discrete':   {'input': None, 'output': 'calculated', 'local': 'calculated'},
         'continuous': {'input': None, 'output': 'calculated', 'local': 'calculated', 'independent': None},
+        'clock':      {'inferred': None, 'triggered': None},
     }
 
     # model variables
@@ -371,16 +541,63 @@ def read_model_description(filename, validate=True):
         sv.causality = variable.get('causality', default='local')
         sv.variability = variable.get('variability')
         sv.initial = variable.get('initial')
+        sv.sourceline = variable.sourceline
 
-        value = next(variable.iterchildren())
+        if fmiVersion in ['1.0', '2.0']:
+            # get the "value" element
+            for child in variable.iterchildren():
+                if child.tag in {'Real', 'Integer', 'Boolean', 'String', 'Enumeration'}:
+                    value = child
+                    break
+        else:
+            value = variable
+
         sv.type = value.tag
         sv.start = value.get('start')
 
+        type_map = {
+            'Real':        float,
+            'Integer':     int,
+            'Enumeration': int,
+            'Boolean':     bool,
+            'String':      str,
+
+            'Float32':     float,
+            'Float64':     float,
+            'Int8':        int,
+            'UInt8':       int,
+            'Int16':       int,
+            'UInt16':      int,
+            'Int32':       int,
+            'UInt32':      int,
+            'Int64':       int,
+            'UInt64':      int,
+            'Binary':      bytes,
+            'Clock':       float,
+        }
+
+        sv._python_type = type_map[sv.type]
+
         if sv.type == 'Real':
             sv.unit = value.get('unit')
+            sv.displayUnit = value.get('displayUnit')
+            sv.relativeQuantity = value.get('relativeQuantity') == 'true'
+            sv.derivative = value.get('derivative')
+            sv.nominal = value.get('nominal')
+            sv.unbounded = value.get('unbounded') == 'true'
+
+        if sv.type in ['Real', 'Integer', 'Enumeration']:
+            sv.quantity = value.get('quantity')
+            sv.min = value.get('min')
+            sv.max = value.get('max')
 
         # resolve the declared type
-        sv.declaredType = typeDefinitions[value.get('declaredType')]
+        declared_type = value.get('declaredType')
+        if declared_type in type_definitions:
+            sv.declaredType = type_definitions[value.get('declaredType')]
+        else:
+            raise Exception('Variable "%s" (line %s) has declaredType="%s" which has not been defined.'
+                            % (sv.name, sv.sourceline, declared_type))
 
         if fmiVersion == '1.0':
             if sv.causality == 'internal':
@@ -391,37 +608,180 @@ def read_model_description(filename, validate=True):
                 sv.variability = None
         else:
             if sv.variability is None:
-                if sv.type == 'Real':
-                    sv.variability = 'continuous'
-                else:
-                    sv.variability = 'discrete'
+                sv.variability = 'continuous' if sv.type in {'Float32', 'Float64', 'Real'} else 'discrete'
 
             if sv.initial is None:
-                sv.initial = initial_defaults[sv.variability][sv.causality]
+                try:
+                    sv.initial = initial_defaults[sv.variability][sv.causality]
+                except KeyError:
+                    raise Exception('Variable "%s" (line %s) has an illegal combination of causality="%s"'
+                                    ' and variability="%s".' % (sv.name, sv.sourceline, sv.causality, sv.variability))
+
+        dimensions = variable.findall('Dimension')
+
+        if dimensions:
+            sv.dimensions = []
+            for dimension in dimensions:
+                start = dimension.get('start')
+                sv.dimensions.append(int(start) if start is not None else None)
+                vr = dimension.get('valueReference')
+                sv.dimensionValueReferences.append(int(vr) if vr is not None else None)
 
         modelDescription.modelVariables.append(sv)
 
-    # model structure
-    for attr, element in [(modelDescription.outputs, 'Outputs'),
-                          (modelDescription.derivatives, 'Derivatives'),
-                          (modelDescription.initialUnknowns, 'InitialUnknowns')]:
+    # variables = dict((v.valueReference, v) for v in modelDescription.modelVariables)
+    #
+    # resolve dimensions and calculate extent
+    # for variable in modelDescription.modelVariables:
+    #     variable.dimensions = list(map(lambda vr: variables[vr], variable.dimensions))
+    #     variable.extent = tuple(map(lambda d: int(d.start), variable.dimensions))
 
-        for u in root.findall('ModelStructure/' + element + '/Unknown'):
-            unknown = Unknown()
+    if fmiVersion == '2.0':
 
-            unknown.variable = modelDescription.modelVariables[int(u.get('index')) - 1]
+        # model structure
+        for attr, element in [(modelDescription.outputs, 'Outputs'),
+                              (modelDescription.derivatives, 'Derivatives'),
+                              (modelDescription.initialUnknowns, 'InitialUnknowns')]:
 
-            dependencies = u.get('dependencies')
+            for u in root.findall('ModelStructure/' + element + '/Unknown'):
+                unknown = Unknown()
 
-            if dependencies:
-                for i in dependencies.split(' '):
-                    unknown.dependencies.append(modelDescription.modelVariables[int(i) - 1])
+                unknown.variable = modelDescription.modelVariables[int(u.get('index')) - 1]
 
-            dependenciesKind = u.get('dependenciesKind')
+                dependencies = u.get('dependencies')
 
-            if dependenciesKind:
-                unknown.dependenciesKind = u.get('dependenciesKind').split(' ')
+                if dependencies:
+                    for vr in dependencies.strip().split(' '):
+                        unknown.dependencies.append(modelDescription.modelVariables[int(vr) - 1])
 
-            attr.append(unknown)
+                dependenciesKind = u.get('dependenciesKind')
+
+                if dependenciesKind:
+                    unknown.dependenciesKind = dependenciesKind.strip().split(' ')
+
+                attr.append(unknown)
+
+    if validate:
+
+        # assert attribute "derivative" for derivatives defined in <ModelStructure>
+        for i, derivative in enumerate(modelDescription.derivatives):
+            if derivative.variable.derivative is None:
+                raise Exception('State variable "%s" (line %s, state index %d) does not define a derivative.' % (derivative.variable.name, derivative.variable.sourceline, i + 1))
+
+        unit_definitions = {}
+
+        for unit in modelDescription.unitDefinitions:
+            unit_definitions[unit.name] = [display_unit.name for display_unit in unit.displayUnits]
+
+        variable_names = set()
+
+        # assert unique variable names (FMI 1.0 spec, p. 34, FMI 2.0 spec, p. 45)
+        for variable in modelDescription.modelVariables:
+            if variable.name in variable_names:
+                raise Exception('Variable name "%s" (line %s) is not unique.' % (variable.name, variable.sourceline))
+            variable_names.add(variable.name)
+
+        if modelDescription.fmiVersion == '2.0':
+
+            # assert required start values (see FMI 2.0 spec, p. 47)
+            for variable in modelDescription.modelVariables:
+                if (variable.initial in {'exact', 'approx'} or variable.causality == 'input') and variable.start is None:
+                    raise Exception('Variable "%s" (line %s) has no start value.' % (variable.name, variable.sourceline))
+
+            # legal combinations of causality and variability (see FMI 2.0 spec, p. 49)
+            legal_combinations = {
+                ('parameter', 'fixed'),
+                ('parameter', 'tunable'),
+                ('calculatedParameter', 'fixed'),
+                ('calculatedParameter', 'tunable'),
+                ('input', 'discrete'),
+                ('input', 'continuous'),
+                ('output', 'constant'),
+                ('output', 'discrete'),
+                ('output', 'continuous'),
+                ('local', 'constant'),
+                ('local', 'fixed'),
+                ('local', 'tunable'),
+                ('local', 'discrete'),
+                ('local', 'continuous'),
+                ('independent', 'continuous'),
+            }
+
+            for variable in modelDescription.modelVariables:
+                if (variable.causality, variable.variability) not in legal_combinations:
+                    raise Exception('The combination causlity="%s" and variability="%s" in variable "%s" (line %s) is not allowed.'
+                                    % (variable.causality, variable.variability, variable.name, variable.sourceline))
+
+            # check required start values
+            for variable in modelDescription.modelVariables:
+                if (variable.initial in {'exact', 'approx'} or variable.causality == 'input') and variable.start is None:
+                    raise Exception('Variable "%s" (line %s) has no start value.' % (variable.sourceline, variable.name))
+
+            # validate outputs
+            outputs = set([v for v in modelDescription.modelVariables if v.causality == 'output'])
+            unknowns = set([u.variable for u in modelDescription.outputs])
+
+            if outputs != unknowns:
+                raise Exception('ModelStructure/Outputs must have exactly one entry for each variable with causality="output".')
+
+            # validate units
+            for variable in modelDescription.modelVariables:
+
+                unit = variable.unit
+
+                if unit is None and variable.declaredType is not None:
+                    unit = variable.declaredType.unit
+
+                if unit is not None and unit not in unit_definitions:
+                    raise Exception('The unit "%s" of variable "%s" (line %s) is not defined.' % (unit, variable.name, variable.sourceline))
+
+                if variable.displayUnit is not None and variable.displayUnit not in unit_definitions[unit]:
+                    raise Exception('The display unit "%s" of variable "%s" (line %s) is not defined.' % (variable.displayUnit, variable.name, variable.sourceline))
+
+    if validate_variable_names:
+
+        if modelDescription.variableNamingConvention == 'flat':
+
+            for variable in modelDescription.modelVariables:
+
+                if u'\u000D' in variable.name:
+                    raise Exception('Variable "%s" (line %s) contains an illegal carriage return character (U+000D).'
+                                    % (variable.name, variable.sourceline))
+
+                if u'\u000A' in variable.name:
+                    raise Exception('Variable "%s" (line %s) contains an illegal line feed character (U+000A).'
+                                    % (variable.name, variable.sourceline))
+
+                if u'\u0009' in variable.name:
+                    raise Exception('Variable "%s" (line %s) contains an illegal tab character (U+0009).'
+                                    % (variable.name, variable.sourceline))
+
+        else:  # variableNamingConvention == structured
+
+            from lark import Lark
+
+            grammar = r"""
+                name            : identifier | "der(" identifier ("," unsignedinteger)? ")"
+                identifier      : bname arrayindices? ("." bname arrayindices?)*
+                bname           : nondigit (nondigit|digit)* | qname
+                nondigit        : "_" | "a".."z" | "A".."Z"
+                digit           : "0".."9"
+                qname           : "'" ( qchar | escape ) ( qchar | escape ) "'"
+                qchar           : nondigit | digit | "!" | "#" | "$" | "%" | "&" | "(" | ")" 
+                                  | "*" | "+" | "," | "-" | "." | "/" | ":" | ";" | "<" | ">"
+                                  | "=" | "?" | "@" | "[" | "]" | "^" | "{" | "}" | "|" | "~" | " "
+                escape          : "\'" | "\"" | "\?" | "\\" | "\a" | "\b" | "\f" | "\n" | "\r" | "\t" | "\v"
+                arrayindices    : "[" unsignedinteger ("," unsignedinteger)* "]"
+                unsignedinteger : digit+
+                """
+
+            parser = Lark(grammar, start='name')
+
+            try:
+                for variable in modelDescription.modelVariables:
+                    parser.parse(variable.name)
+            except Exception as e:
+                raise Exception('"%s" (line %s) is not a legal variable name for naming convention "structured". %s'
+                                % (variable.name, variable.sourceline, e))
 
     return modelDescription
