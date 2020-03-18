@@ -337,7 +337,7 @@ def plot_result(result, reference=None, names=None, filename=None, window_title=
 
 def fmu_path_info(path):
     """ Extract information from the FMU's file path """
-
+    
     head = path
     values = []
 
@@ -482,7 +482,7 @@ def fmu_info(filename, causalities=['input', 'output']):
 
         start = str(v.start) if v.start is not None else ''
 
-        unit = v.unit if v.unit else v.declaredType.unit if v.declaredType else None
+        unit = v.declaredType.unit if v.declaredType else v.unit
 
         args = ['' if s is None else str(s) for s in [v.name, v.causality, start, unit, v.description]]
 
