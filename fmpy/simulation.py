@@ -749,7 +749,7 @@ def simulateME(model_description, fmu_kwargs, start_time, stop_time, solver_name
             if is_fmi1:
                 if input_event:
                     input.apply(time=time, after_event=True)
-                    
+
                 fmu.eventUpdate()
             else:
                 if is_fmi3:
@@ -827,6 +827,7 @@ def simulateCS(model_description, fmu_kwargs, start_time, stop_time, relative_to
         fmu.exitInitializationMode()
 
     recorder = Recorder(fmu=fmu, modelDescription=model_description, variableNames=output, interval=output_interval)
+    recorder.sample(time)
 
     n_steps = 0
 
@@ -836,11 +837,11 @@ def simulateCS(model_description, fmu_kwargs, start_time, stop_time, relative_to
         if timeout is not None and (current_time() - sim_start) > timeout:
             break
 
-        recorder.sample(time)
-
         input.apply(time)
 
         fmu.doStep(currentCommunicationPoint=time, communicationStepSize=output_interval)
+
+        recorder.sample(time)
 
         if step_finished is not None and not step_finished(time, recorder):
             break
